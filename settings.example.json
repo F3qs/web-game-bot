@@ -1,0 +1,25 @@
+{
+    "min_lvl": 1,
+    "max_lvl": 10,
+    "min_group": 1,
+    "max_group": 3,
+    "map_keywords": [
+        "Ithan"
+    ],
+    "restock_enabled": false,
+    "restock_teleport": "Zwój teleportacji na Kwieciste Przejście",
+    "restock_npc": "Tunia Frupotius",
+    "restock_shop_map": "Dom Tunii",
+    "restock_sell_sequence": "1,1,2",
+    "restock_return_method": "npc_teleport",
+    "restock_return_scroll": "",
+    "restock_return_walk_path": "",
+    "npc_teleport_npc_name": "Zakonnik Planu Astralnego",
+    "npc_teleport_npc_map": "Thuzal",
+    "npc_teleport_city": "Werbin",
+    "npc_teleport_walk_to_npc": "",
+    "npc_teleport_after_path": "",
+    "death_return_path": "",
+    "discord_enabled": false,
+    "discord_webhook_url": "TUTAJ_WPISZ_SWOJ_WEBHOOK"
+}
