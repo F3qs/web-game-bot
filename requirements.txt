@@ -1,0 +1,5 @@
+customtkinter>=5.2.2
+selenium>=4.15.2
+selenium-stealth>=1.0.6
+keyboard>=0.13.5
+requests>=2.31.0
