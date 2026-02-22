@@ -7,7 +7,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
 
 from config import WALK_TIMEOUT, MAP_CHANGE_WAIT, LOOP_INTERVAL, AFTER_BATTLE_WAIT, NO_MOB_RETRIES, gauss_sleep, rsleep_range, rsleep
-from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click
+from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path as core_walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click
 from captcha import check_and_solve_captcha
 from notifications import send_discord_notification
 
@@ -19,14 +19,59 @@ def random_micro_behavior(driver, gui):
     """Wykonuje losową, ludzką czynność niezwiązaną z expieniem."""
     rand = random.random()
     try:
-            # Poruszanie lekko myszką po ekranie
-            action = ActionChains(driver)
-            for _ in range(random.randint(1, 4)):
-                action.move_by_offset(random.randint(-50, 50), random.randint(-50, 50))
-                action.pause(random.uniform(0.1, 0.4))
-            action.perform()
+        # Poruszanie lekko myszką po ekranie
+        action = ActionChains(driver)
+        for _ in range(random.randint(1, 4)):
+            action.move_by_offset(random.randint(-50, 50), random.randint(-50, 50))
+            action.pause(random.uniform(0.1, 0.4))
+        action.perform()
     except: pass
 
+# ══════════════════════════════════════════════════════════════════════════════════
+#  Ulepszone chodzenie po ścieżce (z logami i mądrzejszym szukaniem)
+# ══════════════════════════════════════════════════════════════════════════════════
+
+def walk_map_path(driver, cfg, gui, path_str: str, tag: str = "TRASA") -> bool:
+    path_maps = [m.strip() for m in path_str.split(',') if m.strip()]
+    if not path_maps: return True
+    
+    for i, target_map in enumerate(path_maps):
+        current_map = get_current_map(driver)
+        if target_map.lower() in current_map.lower(): 
+            continue
+            
+        if gui: gui.log(f"[{tag}] Idę do: {target_map}")
+        reached = False
+        
+        for attempt in range(4):
+            portals = find_portal_to_next_map(driver, [target_map])
+            if not portals:
+                time.sleep(1.5)
+                portals = find_portal_to_next_map(driver, [target_map])
+                
+            if not portals:
+                if gui: gui.log(f"[{tag}] Nie widzę przejścia do '{target_map}' (próba {attempt+1}/4)")
+                time.sleep(2.0)
+                continue
+                
+            res = change_map(driver, portals[0], gui, min_lvl=cfg.min_lvl, max_lvl=cfg.max_lvl, min_group=getattr(cfg, 'min_group', 1), max_group=getattr(cfg, 'max_group', 10))
+            if res is True:
+                rsleep(MAP_CHANGE_WAIT)
+                wait_for_game_ready(driver, timeout=15)
+                reached = True
+                break
+            elif res == 'mob_found':
+                time.sleep(0.5)
+                if target_map.lower() in get_current_map(driver).lower(): 
+                    reached = True
+                break
+            time.sleep(1.0)
+            
+        if not reached:
+            if gui: gui.log(f"[{tag}] ❌ BŁĄD TRASY: Utknąłem i nie mogę wejść do '{target_map}'. Upewnij się, że nazwa nie ma literówek!")
+            return False
+            
+    return True
 
 # ══════════════════════════════════════════════════════════════════════════════════
 #  Restock / Powrót
@@ -143,42 +188,65 @@ def npc_teleport_routine(driver, cfg, gui=None) -> bool:
 
     try:
         walk_to_npc = getattr(cfg, 'npc_teleport_walk_to_npc', '').strip()
-        if walk_to_npc: walk_map_path(driver, cfg, gui, walk_to_npc, tag="NPC-TP")
+        if walk_to_npc:
+            if not walk_map_path(driver, cfg, gui, walk_to_npc, tag="NPC-TP"):
+                return False
             
         npc = find_npc_on_map(driver, cfg.npc_teleport_npc_name)
         if not npc: time.sleep(2); npc = find_npc_on_map(driver, cfg.npc_teleport_npc_name)
-        if not npc: return False
+        if not npc:
+            if gui: gui.log(f"[NPC-TP] Nie znaleziono NPC: {cfg.npc_teleport_npc_name}")
+            return False
 
         hero = get_hero_pos(driver)
         if abs(hero['x'] - npc['x']) + abs(hero['y'] - npc['y']) > 1:
             if not smart_walk_to(driver, npc['x'], npc['y'], timeout=WALK_TIMEOUT, gui=gui): return False
             rsleep(0.5)
 
+        if gui: gui.log(f"[NPC-TP] Rozmawiam z {cfg.npc_teleport_npc_name}...")
         talk_to_npc_by_id(driver, npc['id'])
-        rsleep(1.0)
-        if not wait_for_dialog(driver, timeout=10): return False
+        rsleep(1.5)
+        if not wait_for_dialog(driver, timeout=10):
+            if gui: gui.log("[NPC-TP] Brak okna dialogowego po kliknięciu NPC.")
+            return False
 
-        ok = (select_dialog_option_by_index(driver, 1) or select_dialog_option_by_text(driver, "teleportować"))
-        if not ok: return False
-        rsleep(1.2)
-        if not wait_for_dialog(driver, timeout=10): return False
+        # Inteligentniejsze szukanie opcji teleportacji (czasem jest to 'teleport', czasem 'przenieś')
+        ok = (select_dialog_option_by_text(driver, "teleport") or select_dialog_option_by_text(driver, "przenieś") or select_dialog_option_by_index(driver, 1))
+        if not ok:
+            if gui: gui.log("[NPC-TP] Nie znaleziono opcji wyboru teleportacji u NPC.")
+            return False
+        
+        rsleep(1.5)
+        if not wait_for_dialog(driver, timeout=10):
+            if gui: gui.log("[NPC-TP] NPC nie pokazał listy miast.")
+            return False
 
         city = cfg.npc_teleport_city
-        city_num = NPC_TELEPORT_CITY_OPTIONS.get(city)
-        selected = select_dialog_option_by_index(driver, city_num) if city_num else False
-        if not selected: selected = select_dialog_option_by_text(driver, city.split()[0])
-        if not selected: return False
+        # Szukanie po nazwie miasta wpisanej przez uzytkownika
+        selected = select_dialog_option_by_text(driver, city.split()[0])
+        if not selected:
+            city_num = NPC_TELEPORT_CITY_OPTIONS.get(city)
+            selected = select_dialog_option_by_index(driver, city_num) if city_num else False
+            
+        if not selected:
+            if gui: gui.log(f"[NPC-TP] BŁĄD: NPC nie ma opcji teleportu do '{city}'!")
+            return False
 
-        rsleep(1.5)
+        if gui: gui.log(f"[NPC-TP] Kliknięto teleport do: {city}. Czekam...")
+        rsleep(2.5)
         wait_for_game_ready(driver, timeout=20)
         time.sleep(1.0)
 
         after_path = getattr(cfg, 'npc_teleport_after_path', '').strip()
-        if after_path: walk_map_path(driver, cfg, gui, after_path, tag="NPC-TP→EXP")
+        if after_path:
+            if gui: gui.log("[NPC-TP] Wyruszam w trasę po teleporcie...")
+            walk_map_path(driver, cfg, gui, after_path, tag="NPC-TP→EXP")
 
         cfg.status = "Aktywny"
         return True
-    except: return False
+    except Exception as e:
+        if gui: gui.log(f"[NPC-TP] Krytyczny błąd: {str(e)}")
+        return False
     finally:
         cfg._npc_teleport_in_progress = False
         cfg._npc_teleport_pending = False
