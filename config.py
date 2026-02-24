@@ -76,12 +76,13 @@ class BotConfig:
         self.npc_teleport_after_path  = ""
         self._npc_teleport_in_progress = False
         self._npc_teleport_pending     = False
-
         self.death_return_path = ""
         self.discord_enabled = False
         self.discord_webhook_url = ""
+        self.discord_webhook_pm_url = ""  # Nowy Webhook dla wiadomości prywatnych
         self.discord_private_messages = False
         self.avoid_elites = False
+        self._starting_gold = None        # Pamięć startowego złota
 
         # ── Ustawienia przeglądarki & Anti-Fingerprint ────────────────────────
         self.browser_type        = "chrome"
@@ -221,6 +222,7 @@ class BotConfig:
             "death_return_path": self.death_return_path,
             "discord_enabled": self.discord_enabled,
             "discord_webhook_url": self.discord_webhook_url,
+            "discord_webhook_pm_url": self.discord_webhook_pm_url,
             "discord_private_messages": self.discord_private_messages,
             "avoid_elites": self.avoid_elites,
             "preferred_character": self.preferred_character,

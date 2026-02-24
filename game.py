@@ -574,7 +574,35 @@ def check_for_death(driver):
         if (mins === 0 && secs === 0) return null;
         return (mins * 60) + secs;
     """)
+def check_for_death(driver):
+    return safe_js(driver, """
+        var el = document.querySelector('.dazed-time');
+        if (!el || el.offsetParent === null) return null;
+        var text = el.textContent.trim();
+        if (!text) return null;
+        var mins = 0, secs = 0;
+        var mMatch = text.match(/(\\d+)\\s*min/);
+        var sMatch = text.match(/(\\d+)\\s*s/);
+        if (mMatch) mins = parseInt(mMatch[1]);
+        if (sMatch) secs = parseInt(sMatch[1]);
+        if (mins === 0 && secs === 0) return null;
+        return (mins * 60) + secs;
+    """)
 
+def get_hero_gold(driver):
+    """Pobiera aktualną ilość złota postaci."""
+    return safe_js(driver, """
+        if (typeof Engine !== 'undefined' && Engine.hero && Engine.hero.d && typeof Engine.hero.d.gold !== 'undefined') {
+            return parseInt(Engine.hero.d.gold) || 0;
+        }
+        // Fallback do zczytywania z DOM (z kafelka .herogold)
+        var el = document.querySelector('.herogold');
+        if (el) {
+            var txt = el.textContent.replace(/\\s/g, ''); // Usuwa spacje (np. 500 841 309 -> 500841309)
+            return parseInt(txt) || 0;
+        }
+        return 0;
+    """, default=0)
 # ══════════════════════════════════════════════════════════════════════════════════
 #  Pathfinding (BFS)
 # ══════════════════════════════════════════════════════════════════════════════════

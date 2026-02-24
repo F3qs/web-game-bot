@@ -484,14 +484,26 @@ class BotGUI:
         self.var_dsc_enabled = tk.BooleanVar(value=config.discord_enabled)
         ctk.CTkCheckBox(in_dsc, text="Włącz powiadomienia Discord", variable=self.var_dsc_enabled).pack(anchor="w", padx=10, pady=5)
 
-        ctk.CTkLabel(in_dsc, text="Webhook URL:").pack(anchor="w", padx=10, pady=(5,0))
+        ctk.CTkLabel(in_dsc, text="Webhook URL (Główny - Zgony, przerwy, bot itp.):").pack(anchor="w", padx=10, pady=(5,0))
         self.var_dsc_url = tk.StringVar(value=config.discord_webhook_url)
         ctk.CTkEntry(in_dsc, textvariable=self.var_dsc_url, width=400).pack(fill="x", padx=10, pady=5)
 
         self.var_dsc_pm = tk.BooleanVar(value=config.discord_private_messages)
         ctk.CTkCheckBox(in_dsc, text="Wysyłaj wiadomości prywatne (z gry) na Discord", variable=self.var_dsc_pm).pack(anchor="w", padx=10, pady=5)
 
+        ctk.CTkLabel(in_dsc, text="Webhook URL (TYLKO na Prywatne Wiadomości):").pack(anchor="w", padx=10, pady=(5,0))
+        self.var_dsc_pm_url = tk.StringVar(value=getattr(config, 'discord_webhook_pm_url', ''))
+        ctk.CTkEntry(in_dsc, textvariable=self.var_dsc_pm_url, width=400, placeholder_text="Zostaw puste, by wysyłać na główny Webhook").pack(fill="x", padx=10, pady=5)
+
         ctk.CTkButton(in_dsc, text="💾 Zapisz ustawienia Discord", command=self._save_discord_settings).pack(pady=10)
+
+    def _save_discord_settings(self):
+        self.cfg.discord_enabled = self.var_dsc_enabled.get()
+        self.cfg.discord_webhook_url = self.var_dsc_url.get().strip()
+        self.cfg.discord_private_messages = self.var_dsc_pm.get()
+        self.cfg.discord_webhook_pm_url = self.var_dsc_pm_url.get().strip()
+        self.cfg.save()
+        self.log(f"[USTAWIENIA] Zapisano konfigurację Discord.")
 
     def _save_discord_settings(self):
         self.cfg.discord_enabled = self.var_dsc_enabled.get()

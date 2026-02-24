@@ -7,7 +7,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
 
 from config import WALK_TIMEOUT, MAP_CHANGE_WAIT, LOOP_INTERVAL, AFTER_BATTLE_WAIT, NO_MOB_RETRIES, gauss_sleep, rsleep_range, rsleep
-from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path as core_walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click, ensure_in_game, is_on_login_page, get_incoming_private_messages
+from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path as core_walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click, ensure_in_game, is_on_login_page, get_incoming_private_messages, get_hero_gold
 from captcha import check_and_solve_captcha
 from notifications import send_discord_notification
 
@@ -264,6 +264,10 @@ def bot_loop(cfg, gui):
         
     while cfg.running:
         try:
+            # --- ZAPISYWANIE ZŁOTA STARTOWEGO ---
+            if getattr(cfg, '_starting_gold', None) is None and get_current_map(driver):
+                cfg._starting_gold = get_hero_gold(driver)
+
             # --- WIADOMOŚCI PRYWATNE (DISCORD) ---
             if cfg.discord_enabled and cfg.discord_private_messages:
                 pms = get_incoming_private_messages(driver)
@@ -271,8 +275,13 @@ def bot_loop(cfg, gui):
                     # Unikalny identyfikator wiadomości: czas-autor-tekst
                     msg_hash = f"{pm['time']}-{pm['author']}-{pm['text']}"
                     if msg_hash not in last_pm_hash:
+                        # Sprawdzamy, czy użytkownik ustawił osobny webhook na PM. Jeśli nie, używamy głównego.
+                        pm_webhook = getattr(cfg, 'discord_webhook_pm_url', '')
+                        if not pm_webhook: 
+                            pm_webhook = cfg.discord_webhook_url
+                        
                         send_discord_notification(
-                            cfg.discord_webhook_url, 
+                            pm_webhook, 
                             f"**Od:** {pm['author']}\n**Godz:** {pm['time']}\n\n{pm['text']}", 
                             "📩 Wiadomość Prywatna", 
                             color=0x9b59b6
@@ -295,12 +304,27 @@ def bot_loop(cfg, gui):
                     wake_at = datetime.datetime.now() + datetime.timedelta(seconds=wait_total)
                     cfg.status = f"Harmonogram — czekam do {wake_at.strftime('%H:%M')}"
                     gui.log(f"[HARMONOGRAM] Poza oknem aktywnosci. Czekam do ok. {wake_at.strftime('%H:%M')} ({wait_total//60} min).")
+                    
+                    # === ODCZYT I OBLICZANIE ZŁOTA ===
+                    current_gold = get_hero_gold(driver)
+                    start_gold = getattr(cfg, '_starting_gold', current_gold) or current_gold
+                    balance = current_gold - start_gold
+                    
+                    # Funkcja do formatowania liczby z odstępami (np. 1 000 000)
+                    def fmt_gold(g): return "{:,}".format(g).replace(',', ' ')
+                    
+                    msg = f"Bot wychodzi z gry zgodnie z harmonogramem.\nPowrót ok. **{wake_at.strftime('%H:%M')}**.\n\n"
+                    msg += f"💰 **Aktualne Złoto:** {fmt_gold(current_gold)}\n"
+                    msg += f"📈 **Bilans sesji:** {'+' if balance >= 0 else ''}{fmt_gold(balance)}"
+
                     if cfg.discord_enabled:
-                        send_discord_notification(cfg.discord_webhook_url,
-                            f"Bot wychodzi z gry zgodnie z harmonogramem.\nPowrot ok. **{wake_at.strftime('%H:%M')}**.",
-                            "⏰ Harmonogram — przerwa", color=0x5865f2)
+                        send_discord_notification(cfg.discord_webhook_url, msg, "⏰ Harmonogram — przerwa", color=0x5865f2)
+                    
                     go_to_homepage(driver)
                     cfg._schedule_next_event_ts = time.time() + wait_total
+                    
+                    # Resetujemy startowe złoto, by w nowym oknie harmonogramu zaczęło liczyć od nowa (jeśli chcesz)
+                    cfg._starting_gold = None 
                 else:
                     # juz czekamy — sprawdzamy co 30s czy czas minal
                     remaining = cfg._schedule_next_event_ts - time.time()
