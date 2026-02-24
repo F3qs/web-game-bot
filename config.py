@@ -1,5 +1,5 @@
 """
-config.py — stałe oraz klasa BotConfig (wspólny stan między GUI a wątkiem bota)
+config.py — stałe oraz klasa BotConfig (Wersja klasyczna)
 """
 import threading
 import json
@@ -7,7 +7,7 @@ import os
 import time
 import random
 
-# ── Stałe (nie zmieniane z GUI) ─────────────────────────────────────────────────
+# ── Stałe ───────────────────────────────────────────────────────────────────────
 REMOTE_DEBUG_PORT = 9222
 LOOP_INTERVAL     = 1.0
 WALK_TIMEOUT      = 30
@@ -19,7 +19,8 @@ MAP_CHANGE_WAIT   = 3
 NO_MOB_RETRIES    = 3
 SETTINGS_FILE     = "settings.json"
 
-# ── Pomocnicze funkcje czasu (Gauss) ──────────────────────────────────────
+
+# ── Pomocnicze funkcje czasu ────────────────────────────────────────────────────
 def gauss_sleep(mu, sigma):
     """Opóźnienie oparte na rozkładzie Gaussa dla bardziej ludzkich przerw."""
     delay = random.gauss(mu, sigma)
@@ -40,6 +41,8 @@ class BotConfig:
     def __init__(self):
         self._lock = threading.Lock()
 
+        self.settings_file = SETTINGS_FILE
+        
         self._min_lvl = 1
         self._max_lvl = 300
         self._min_group = 1
@@ -77,6 +80,28 @@ class BotConfig:
         self.death_return_path = ""
         self.discord_enabled = False
         self.discord_webhook_url = ""
+        self.discord_private_messages = False
+        self.avoid_elites = False
+
+        # ── Ustawienia przeglądarki & Anti-Fingerprint ────────────────────────
+        self.browser_type        = "chrome"
+        self.browser_binary_path = ""          
+        self.stealth_webgl       = True        
+        self.stealth_canvas      = True        
+        self.stealth_audio       = True        
+        self.stealth_webrtc      = True        
+        self.stealth_timezone    = True        
+        self.webgl_vendor        = "Google Inc. (Intel)"
+        self.webgl_renderer      = "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+
+        self.preferred_character = ""
+        self._in_death_sequence = False
+
+        self.schedule_enabled        = False
+        self.schedule_windows        = []
+        self.schedule_random_offset  = 5
+        self._scheduler_idle         = False
+        self._schedule_next_event_ts = 0.0
 
     def update_map_timer(self, map_name):
         if not map_name: return
@@ -89,6 +114,56 @@ class BotConfig:
                 if map_name in key or key in map_name:
                     return val
             return 0.0
+
+    @staticmethod
+    def _parse_hhmm(s: str):
+        try:
+            h, m = s.strip().split(":")
+            return int(h), int(m)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _minutes_since_midnight() -> int:
+        import datetime
+        now = datetime.datetime.now()
+        return now.hour * 60 + now.minute
+
+    def is_in_schedule_window(self) -> bool:
+        if not self.schedule_enabled or not self.schedule_windows:
+            return True
+        now_m = self._minutes_since_midnight()
+        for w in self.schedule_windows:
+            s = self._parse_hhmm(w.get("start", ""))
+            e = self._parse_hhmm(w.get("end", ""))
+            if not s or not e:
+                continue
+            start_m = s[0] * 60 + s[1]
+            end_m   = e[0] * 60 + e[1]
+            if start_m <= end_m:
+                if start_m <= now_m < end_m:
+                    return True
+            else:
+                if now_m >= start_m or now_m < end_m:
+                    return True
+        return False
+
+    def seconds_until_next_window(self) -> int:
+        if not self.schedule_windows:
+            return 60
+        now_m = self._minutes_since_midnight()
+        best = 24 * 60
+        for w in self.schedule_windows:
+            s = self._parse_hhmm(w.get("start", ""))
+            if not s:
+                continue
+            start_m = s[0] * 60 + s[1]
+            diff = (start_m - now_m) % (24 * 60)
+            if diff == 0:
+                diff = 24 * 60
+            if diff < best:
+                best = diff
+        return best * 60
 
     @property
     def min_lvl(self):
@@ -146,17 +221,32 @@ class BotConfig:
             "death_return_path": self.death_return_path,
             "discord_enabled": self.discord_enabled,
             "discord_webhook_url": self.discord_webhook_url,
+            "discord_private_messages": self.discord_private_messages,
+            "avoid_elites": self.avoid_elites,
+            "preferred_character": self.preferred_character,
+            "schedule_enabled": self.schedule_enabled,
+            "schedule_windows": self.schedule_windows,
+            "schedule_random_offset": self.schedule_random_offset,
+            "browser_type": self.browser_type,
+            "browser_binary_path": self.browser_binary_path,
+            "stealth_webgl": self.stealth_webgl,
+            "stealth_canvas": self.stealth_canvas,
+            "stealth_audio": self.stealth_audio,
+            "stealth_webrtc": self.stealth_webrtc,
+            "stealth_timezone": self.stealth_timezone,
+            "webgl_vendor": self.webgl_vendor,
+            "webgl_renderer": self.webgl_renderer,
         }
         try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            with open(self.settings_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"Błąd zapisu ustawień: {e}")
+        except Exception:
+            pass
 
     def load(self):
-        if not os.path.exists(SETTINGS_FILE): return
+        if not os.path.exists(self.settings_file): return
         try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            with open(self.settings_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             self._min_lvl = data.get("min_lvl", 1)
@@ -180,5 +270,20 @@ class BotConfig:
             self.death_return_path = data.get("death_return_path", "")
             self.discord_enabled = data.get("discord_enabled", False)
             self.discord_webhook_url = data.get("discord_webhook_url", "")
-        except Exception as e:
-            print(f"Błąd odczytu ustawień: {e}")
+            self.discord_private_messages = data.get("discord_private_messages", False)
+            self.avoid_elites = data.get("avoid_elites", False)
+            self.preferred_character = data.get("preferred_character", "")
+            self.schedule_enabled       = data.get("schedule_enabled", False)
+            self.schedule_windows       = data.get("schedule_windows", [])
+            self.schedule_random_offset = data.get("schedule_random_offset", 5)
+            self.browser_type        = data.get("browser_type", "chrome")
+            self.browser_binary_path = data.get("browser_binary_path", "")
+            self.stealth_webgl       = data.get("stealth_webgl", True)
+            self.stealth_canvas      = data.get("stealth_canvas", True)
+            self.stealth_audio       = data.get("stealth_audio", True)
+            self.stealth_webrtc      = data.get("stealth_webrtc", True)
+            self.stealth_timezone    = data.get("stealth_timezone", True)
+            self.webgl_vendor        = data.get("webgl_vendor", "Google Inc. (Intel)")
+            self.webgl_renderer      = data.get("webgl_renderer", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)")
+        except Exception:
+            pass

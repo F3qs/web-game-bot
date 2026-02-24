@@ -1,7 +1,8 @@
-import time, random, traceback, re
+import time, random, traceback, re, sys, os, platform
 from selenium_stealth import stealth
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import (
@@ -15,29 +16,216 @@ from config import (
     rsleep, rsleep_range, gauss_sleep
 )
 
-GAME_SERVER_URL = "jaruna.margonem.pl" 
+GAME_SERVER_URL = "jaruna.margonem.pl"
+
+# ── Domyślne ścieżki binariów przeglądarek ───────────────────────────────────
+_BRAVE_PATHS = {
+    "win32":  r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+    "win64":  r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+    "darwin": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "linux":  "/usr/bin/brave-browser",
+}
+_EDGE_PATHS = {
+    "win32":  r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    "win64":  r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    "darwin": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "linux":  "/usr/bin/microsoft-edge",
+}
+
+def _detect_binary(browser_type: str) -> str:
+    """Zwraca domyślną ścieżkę binarki dla danej przeglądarki."""
+    sys_key = sys.platform  # "win32", "darwin", "linux"
+    if browser_type == "brave":
+        return _BRAVE_PATHS.get(sys_key, _BRAVE_PATHS["linux"])
+    if browser_type == "edge":
+        return _EDGE_PATHS.get(sys_key, _EDGE_PATHS["linux"])
+    return ""  # Chrome: ChromeDriver sam go znajdzie
+
+# ── CDP skrypty anty-fingerprint ─────────────────────────────────────────────
+_SCRIPT_WEBDRIVER_FLAG = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            var arr = [1,2,3,4,5].map(function(i){
+                var p = Object.create(Plugin.prototype);
+                Object.defineProperty(p, 'name', {get: () => 'Plugin ' + i});
+                return p;
+            });
+            Object.defineProperty(arr, 'length', {get: () => arr.length});
+            return arr;
+        }
+    });
+    window.chrome = {
+        runtime: {},
+        loadTimes: function(){},
+        csi: function(){},
+        app: {}
+    };
+"""
+
+def _script_webgl(vendor: str, renderer: str) -> str:
+    return f"""
+    (function() {{
+        var GL_VENDOR   = 0x1F00;
+        var GL_RENDERER = 0x1F01;
+        var UNMASKED_VENDOR_WEBGL   = 0x9245;
+        var UNMASKED_RENDERER_WEBGL = 0x9246;
+
+        var SPOOF_VENDOR   = '{vendor}';
+        var SPOOF_RENDERER = '{renderer}';
+
+        var fakeDebugInfo = Object.freeze({{
+            UNMASKED_VENDOR_WEBGL:   UNMASKED_VENDOR_WEBGL,
+            UNMASKED_RENDERER_WEBGL: UNMASKED_RENDERER_WEBGL
+        }});
+
+        function patchContext(CtxProto) {{
+            if (!CtxProto) return;
+
+            var origGetParameter = CtxProto.getParameter;
+            CtxProto.getParameter = function(param) {{
+                switch(param) {{
+                    case GL_VENDOR:               return SPOOF_VENDOR;
+                    case GL_RENDERER:             return SPOOF_RENDERER;
+                    case UNMASKED_VENDOR_WEBGL:   return SPOOF_VENDOR;
+                    case UNMASKED_RENDERER_WEBGL: return SPOOF_RENDERER;
+                    default: return origGetParameter.call(this, param);
+                }}
+            }};
+
+            var origGetExtension = CtxProto.getExtension;
+            CtxProto.getExtension = function(name) {{
+                if (name === 'WEBGL_debug_renderer_info') {{
+                    var realExt = origGetExtension.call(this, name);
+                    return realExt ? fakeDebugInfo : null;
+                }}
+                return origGetExtension.call(this, name);
+            }};
+
+            var origGetSupported = CtxProto.getSupportedExtensions;
+            if (origGetSupported) {{
+                CtxProto.getSupportedExtensions = function() {{
+                    var exts = origGetSupported.call(this);
+                    if (!exts) return exts;
+                    return exts.filter(function(e) {{
+                        return e !== 'WEBGL_debug_renderer_info';
+                    }});
+                }};
+            }}
+        }}
+
+        try {{ patchContext(WebGLRenderingContext.prototype); }}  catch(e) {{}}
+        try {{ patchContext(WebGL2RenderingContext.prototype); }} catch(e) {{}}
+    }})();
+"""
+
+_SCRIPT_CANVAS = """
+    (function() {
+        var noise = function() { return (Math.random() * 0.002 - 0.001); };
+        var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            var ctx = this.getContext('2d');
+            if (ctx) {
+                var img = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
+                for (var i = 0; i < img.data.length; i += 400) {
+                    img.data[i] = Math.max(0, Math.min(255, img.data[i] + Math.round(noise() * 255)));
+                }
+                ctx.putImageData(img, 0, 0);
+            }
+            return origToDataURL.apply(this, arguments);
+        };
+        var origToBlob = HTMLCanvasElement.prototype.toBlob;
+        HTMLCanvasElement.prototype.toBlob = function() {
+            var ctx = this.getContext('2d');
+            if (ctx) {
+                var img = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
+                for (var i = 0; i < img.data.length; i += 400) {
+                    img.data[i] = Math.max(0, Math.min(255, img.data[i] + Math.round((Math.random()*0.002-0.001)*255)));
+                }
+                ctx.putImageData(img, 0, 0);
+            }
+            return origToBlob.apply(this, arguments);
+        };
+    })();
+"""
+
+_SCRIPT_AUDIO = """
+    (function() {
+        var AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        var origGetChannelData = AudioBuffer.prototype.getChannelData;
+        AudioBuffer.prototype.getChannelData = function() {
+            var data = origGetChannelData.apply(this, arguments);
+            for (var i = 0; i < data.length; i += 100) {
+                data[i] += (Math.random() * 0.0001 - 0.00005);
+            }
+            return data;
+        };
+    })();
+"""
+
+_SCRIPT_WEBRTC = """
+    (function() {
+        var origRTCPC = window.RTCPeerConnection;
+        if (!origRTCPC) return;
+        function FakeRTC(config) {
+            if (config && config.iceServers) config.iceServers = [];
+            return new origRTCPC(config || {});
+        }
+        FakeRTC.prototype = origRTCPC.prototype;
+        window.RTCPeerConnection = FakeRTC;
+        ['webkitRTCPeerConnection','mozRTCPeerConnection'].forEach(function(k) {
+            if (window[k]) window[k] = FakeRTC;
+        });
+    })();
+"""
+
+_SCRIPT_TIMEZONE = """
+    (function() {
+        var OrigDate = Date;
+        var _tz = 'Europe/Warsaw';
+        var _offset = -60; // UTC+1 w minutach (ujemne bo getTimezoneOffset zwraca odwrotnie)
+        var origGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+        Date.prototype.getTimezoneOffset = function() { return _offset; };
+        if (window.Intl && Intl.DateTimeFormat) {
+            var origResolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions;
+            Intl.DateTimeFormat.prototype.resolvedOptions = function() {
+                var opts = origResolvedOptions.call(this);
+                opts.timeZone = _tz;
+                return opts;
+            };
+        }
+    })();
+"""
 
 # ══════════════════════════════════════════════════════════════════════════════════
-#  Połączenie i Nawigacja z Selenium-Stealth
+#  Połączenie i Nawigacja z Selenium-Stealth + CDP Anti-Fingerprint
 # ══════════════════════════════════════════════════════════════════════════════════
 
-def connect():
+def connect(cfg=None):
+    """
+    Łączy się z przeglądarką uruchomioną zewnętrznie przez plik .bat.
+    Aplikuje pełny pakiet anty-fingerprint do istniejącej sesji.
+    """
     global GAME_SERVER_URL
-    opts = Options()
-    opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{REMOTE_DEBUG_PORT}")
-    
-    drv = webdriver.Chrome(options=opts)
-    
-    # Aplikowanie stealth (maskowanie automatyzacji)
-    stealth(drv,
-        languages=["pl-PL", "pl"],
-        vendor="Google Inc.",
-        platform="Win32",
-        webgl_vendor="Intel Inc.",
-        renderer="Intel Iris OpenGL Engine",
-        fix_hairline=True,
-    )
 
+    # ── Odczyt ustawień z cfg lub domyślne ────────────────────────────────────
+    do_webgl        = getattr(cfg, 'stealth_webgl', True)
+    do_canvas       = getattr(cfg, 'stealth_canvas', True)
+    do_audio        = getattr(cfg, 'stealth_audio', True)
+    do_webrtc       = getattr(cfg, 'stealth_webrtc', True)
+    do_timezone     = getattr(cfg, 'stealth_timezone', True)
+    webgl_vendor    = getattr(cfg, 'webgl_vendor',   'Google Inc. (Intel)')
+    webgl_renderer  = getattr(cfg, 'webgl_renderer',  'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)')
+
+    # ── Konfiguracja połączenia z istniejącą przeglądarką ─────────────────────
+    opts = Options()
+    port = getattr(cfg, 'debug_port', REMOTE_DEBUG_PORT)
+    opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
+
+    drv = webdriver.Chrome(options=opts)
+
+    # ── Znajdź okno z grą, a dopiero potem aplikuj maskowanie ────────────────
     game_handle = None
     for handle in drv.window_handles:
         drv.switch_to.window(handle)
@@ -48,8 +236,32 @@ def connect():
             break
     if game_handle:
         drv.switch_to.window(game_handle)
-    
-    print("Zastosowano kamuflaż (selenium-stealth).")
+
+    cdp_scripts = [_SCRIPT_WEBDRIVER_FLAG]
+    if do_webgl: cdp_scripts.append(_script_webgl(webgl_vendor, webgl_renderer))
+    if do_canvas: cdp_scripts.append(_SCRIPT_CANVAS)
+    if do_audio: cdp_scripts.append(_SCRIPT_AUDIO)
+    if do_webrtc: cdp_scripts.append(_SCRIPT_WEBRTC)
+    if do_timezone: cdp_scripts.append(_SCRIPT_TIMEZONE)
+
+    combined_script = "\n".join(cdp_scripts)
+    try:
+        drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": combined_script})
+    except Exception: pass
+
+    stealth(drv, languages=["pl-PL", "pl"], vendor="Google Inc.", platform="Win32",
+            webgl_vendor=webgl_vendor, renderer=webgl_renderer, fix_hairline=True)
+
+    # ── Przeładuj stronę, aby "zamrozić" nowy, fałszywy sprzęt ─────────────
+    try:
+        if "margonem.pl" in drv.current_url:
+            print("[BROWSER] Aplikuję kamuflaż i przeładowuję stronę...")
+            drv.execute_script(combined_script)
+            drv.refresh()
+            import time as _t; _t.sleep(2.5)
+    except Exception: pass
+
+    print(f"[BROWSER] Połączono z przeglądarką na porcie {port}. Kamuflaż aktywny.")
     return drv
 
 def go_to_homepage(driver):
@@ -61,6 +273,231 @@ def return_to_game(driver):
         if GAME_SERVER_URL not in driver.current_url:
             driver.get(f"https://{GAME_SERVER_URL}/")
     except: pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+#  Obsługa strony logowania / wyboru postaci
+# ══════════════════════════════════════════════════════════════════════════════════
+
+def is_on_login_page(driver) -> bool:
+    """Sprawdza czy jesteśmy na stronie głównej margonem.pl (nie w grze)."""
+    try:
+        url = driver.current_url
+        # Strona logowania / wyboru postaci
+        if "www.margonem.pl" in url:
+            return True
+        # Przypadek gdy URL zmienił się na margonem.pl bez www
+        if url.rstrip("/") == "https://margonem.pl":
+            return True
+        # Dodatkowe sprawdzenie — brak silnika gry w aktualnej karcie
+        if GAME_SERVER_URL and GAME_SERVER_URL not in url:
+            if "margonem.pl" in url:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def get_login_page_characters(driver) -> list:
+    """
+    Pobiera listę postaci ze strony wyboru postaci.
+    Zwraca listę słowników: [{nick, lvl, world, char_id, element_id}, ...]
+    """
+    try:
+        chars = driver.execute_script("""
+            var result = [];
+            var elements = document.querySelectorAll('.charc[data-nick]');
+            for (var i = 0; i < elements.length; i++) {
+                var el = elements[i];
+                var nick     = el.getAttribute('data-nick')  || '';
+                var lvl      = el.getAttribute('data-lvl')   || '0';
+                var world    = el.getAttribute('data-world') || '';
+                var char_id  = el.getAttribute('data-id')    || '';
+                var el_id    = el.id || '';
+                result.push({
+                    nick:    nick,
+                    lvl:     parseInt(lvl) || 0,
+                    world:   world,
+                    char_id: char_id,
+                    el_id:   el_id
+                });
+            }
+            return result;
+        """)
+        return chars if chars else []
+    except Exception:
+        return []
+
+
+def select_character_and_enter(driver, preferred_nick: str = "", target_world: str = "") -> bool:
+    """
+    Wybiera postac na stronie logowania i klika przycisk 'Wejdz do gry'.
+    Zwraca True jesli URL zmienil sie na serwer gry (nawigacja sie powiodla).
+    """
+    from config import rsleep_range
+
+    if not target_world and GAME_SERVER_URL:
+        target_world = GAME_SERVER_URL.split(".")[0].lower()
+
+    chars = get_login_page_characters(driver)
+    if not chars:
+        print("[LOGIN] Nie znaleziono postaci na stronie wyboru.")
+        return False
+
+    print(f"[LOGIN] Dostepne postaci: {[(c['nick'], c['world'], c['lvl']) for c in chars]}")
+
+    chosen = None
+    # 1. Nick
+    if preferred_nick:
+        for c in chars:
+            if c['nick'].lower() == preferred_nick.lower():
+                chosen = c
+                break
+    # 2. Swiat
+    if not chosen and target_world:
+        for c in chars:
+            if c['world'].lower() == target_world.lower():
+                chosen = c
+                break
+    # 3. Pierwsza
+    if not chosen and chars:
+        chosen = chars[0]
+
+    if not chosen:
+        print("[LOGIN] Nie mozna wybrac postaci.")
+        return False
+
+    print(f"[LOGIN] Wybieram postac: {chosen['nick']} (swiat: {chosen['world']}, lvl: {chosen['lvl']})")
+
+    try:
+        # --- Kliknij kafelek postaci ---
+        char_el = None
+        for sel in [f'.charc[data-nick="{chosen["nick"]}"]', f'.charc[data-id="{chosen["char_id"]}"]']:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                char_el = els[0]
+                break
+
+        if not char_el:
+            print("[LOGIN] Nie znaleziono elementu postaci w DOM.")
+            return False
+
+        rsleep_range(0.8, 1.8)
+        human_move_and_click(driver, char_el)
+        rsleep_range(0.8, 1.5)
+
+        # --- Kliknij przycisk "Wejdz do gry" ---
+        # Kolejnosc selektorow wedlug DevTools: div.c-btn.enter-game wewnatrz #js-login-box
+        ENTER_SELECTORS = [
+            ".c-btn.enter-game",
+            "#js-login-box .c-btn",
+            ".btn-enter-game",
+            ".box-enter .button",
+        ]
+        enter_btn = None
+        for sel in ENTER_SELECTORS:
+            els = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
+            if els:
+                enter_btn = els[0]
+                print(f"[LOGIN] Znaleziono przycisk wejscia: {sel}")
+                break
+
+        # Ostateczny fallback — szukaj po tekscie (bez klikania linkow!)
+        if not enter_btn:
+            for el in driver.find_elements(By.CSS_SELECTOR, "div, button, a"):
+                try:
+                    txt = el.text.strip().lower()
+                    if txt in ("wejdź do gry", "wejdz do gry", "enter game", "play") and el.is_displayed():
+                        enter_btn = el
+                        print(f"[LOGIN] Znaleziono przycisk po tekscie: '{el.text.strip()}'")
+                        break
+                except Exception:
+                    continue
+
+        if not enter_btn:
+            print("[LOGIN] Nie znaleziono przycisku 'Wejdz do gry' — anuluje.")
+            return False
+
+        rsleep_range(0.5, 1.2)
+        human_move_and_click(driver, enter_btn)
+        print("[LOGIN] Kliknieto 'Wejdz do gry'.")
+
+        # Czekaj az URL zmieni sie na serwer gry (max 15s)
+        # To jest dowodem ze nawigacja sie powiodla.
+        game_url = GAME_SERVER_URL or "margonem.pl"
+        for _ in range(30):
+            time.sleep(0.5)
+            try:
+                cur = driver.current_url
+                if game_url in cur and "www." not in cur:
+                    print(f"[LOGIN] URL zmienil sie na gre: {cur}")
+                    return True
+            except Exception:
+                pass
+
+        print("[LOGIN] Timeout — URL nie zmienil sie na serwer gry.")
+        return False
+
+    except Exception as e:
+        print(f"[LOGIN] Blad przy wybieraniu postaci: {e}")
+        return False
+
+
+# Timestamp ostatniej proby logowania — zapobiega petli
+_last_login_attempt_ts: float = 0.0
+_LOGIN_COOLDOWN = 20.0  # sekund minimalnej przerwy miedzy probami
+
+
+def ensure_in_game(driver, cfg=None, gui=None, timeout=90) -> bool:
+    """
+    Sprawdza czy jestesmy w grze. Jesli nie — probuje zalogowac sie / wybrac postac.
+    Ma wbudowany cooldown (20s) zapobiegajacy petli wywolan.
+    Zwraca True gdy gra jest gotowa.
+    """
+    global _last_login_attempt_ts
+    preferred_nick = getattr(cfg, 'preferred_character', '') if cfg else ''
+
+    # Najpierw szybki test — moze juz jestesmy w grze
+    if wait_for_game_ready(driver, timeout=5):
+        return True
+
+    # Nie jestesmy w grze — sprawdz czy to strona logowania
+    if not is_on_login_page(driver):
+        # Inny URL — wroc na serwer gry i czekaj
+        return_to_game(driver)
+        return wait_for_game_ready(driver, timeout=timeout)
+
+    # Strona logowania — sprawdz cooldown aby nie petlic sie
+    now = time.time()
+    since_last = now - _last_login_attempt_ts
+    if since_last < _LOGIN_COOLDOWN:
+        wait_cd = _LOGIN_COOLDOWN - since_last
+        print(f"[LOGIN] Cooldown — czekam jeszcze {wait_cd:.0f}s przed kolejna proba.")
+        if gui: gui.log(f"[LOGIN] Cooldown logowania — czekam {wait_cd:.0f}s...")
+        time.sleep(wait_cd)
+
+    _last_login_attempt_ts = time.time()
+
+    if gui: gui.log("[LOGIN] Wykryto strone logowania — wybieram postac...")
+    print("[LOGIN] Wykryto strone logowania.")
+
+    # Poczekaj az strona w pelni sie zaladuje (DOM z postaciami)
+    time.sleep(random.uniform(2.0, 3.5))
+
+    ok = select_character_and_enter(driver, preferred_nick=preferred_nick)
+    if not ok:
+        if gui: gui.log("[LOGIN] ❌ Nie udalo sie wybrac postaci.")
+        return False
+
+    if gui: gui.log("[LOGIN] ✓ Kliknieto wejdz do gry, czekam na zaladowanie...")
+
+    # Czekaj na pelne zaladowanie silnika gry
+    ready = wait_for_game_ready(driver, timeout=timeout)
+    if ready:
+        if gui: gui.log("[LOGIN] ✅ Gra zaladowana pomyslnie.")
+    else:
+        if gui: gui.log("[LOGIN] ⚠ Timeout zaladowania gry.")
+    return ready
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -273,10 +710,11 @@ def smart_walk_to(driver, target_x, target_y, timeout=WALK_TIMEOUT, gui=None, ch
 #  Moby i walka
 # ══════════════════════════════════════════════════════════════════════════════════
 
-def find_nearest_mob(driver, min_lvl, max_lvl, min_group=1, max_group=10):
+def find_nearest_mob(driver, min_lvl, max_lvl, min_group=1, max_group=10, avoid_elites=False):
     candidates = safe_js(driver, """
         var minLvl = parseInt(arguments[0]), maxLvl = parseInt(arguments[1]);
         var minGrp = parseInt(arguments[2]), maxGrp = parseInt(arguments[3]);
+        var avoidElites = arguments[4];
         var hd = Engine.hero.d;
         var npcs = (typeof Gargonem !== 'undefined' && Gargonem.Core && Gargonem.Core.Npc) ? Gargonem.Core.Npc.getAll() : {};
         function isMobAttackable(n) {
@@ -303,6 +741,15 @@ def find_nearest_mob(driver, min_lvl, max_lvl, min_group=1, max_group=10):
         for (var id in npcs) {
             var n = npcs[id];
             if (!isMobAttackable(n)) continue;
+            
+            // Check rank for elites
+            var rank = 0;
+            if (n.d && typeof n.d.rank !== 'undefined') rank = parseInt(n.d.rank);
+            else if (typeof n.rank !== 'undefined') rank = parseInt(n.rank);
+            
+            // Rank 1 = Elite, Rank 2 = Elite II, Rank 3 = Hero, Rank 4 = Titan
+            if (avoidElites && (rank === 1 || rank === 2)) continue;
+
             var mobLvl = parseInt(n.lvl);
             if (isNaN(mobLvl)) continue;
             if (mobLvl < minLvl || mobLvl > maxLvl) continue;
@@ -320,7 +767,7 @@ def find_nearest_mob(driver, min_lvl, max_lvl, min_group=1, max_group=10):
             return a.mdist - b.mdist; 
         });
         return result.slice(0, 10);
-    """, min_lvl, max_lvl, min_group, max_group, default=[])
+    """, min_lvl, max_lvl, min_group, max_group, avoid_elites, default=[])
 
     if not candidates: return None
 
@@ -369,6 +816,36 @@ def wait_for_battle_end(driver, timeout=BATTLE_TIMEOUT, gui=None):
             check_and_solve_captcha(driver, gui)
         time.sleep(1)
     return False
+
+def get_incoming_private_messages(driver):
+    return safe_js(driver, """
+        var myNick = Engine.hero.d.nick;
+        var msgs = document.querySelectorAll('.chat-PRIVATE-message');
+        var res = [];
+        // Get last 5 messages to be safe
+        var start = Math.max(0, msgs.length - 5);
+        for (var i = start; i < msgs.length; i++) {
+            var m = msgs[i];
+            var authorEl = m.querySelector('.author-section');
+            if (!authorEl) continue;
+            var author = authorEl.textContent.trim();
+            
+            // Ignore my own messages
+            if (author === myNick) continue;
+            
+            var textEl = m.querySelector('.message-part');
+            var timeEl = m.querySelector('.ts-section'); // [00:51]
+            
+            var text = textEl ? textEl.textContent.trim() : "";
+            var time = timeEl ? timeEl.textContent.trim() : "";
+            
+            // Clean up time string "[00:51]" -> "00:51"
+            time = time.replace('[', '').replace(']', '');
+            
+            res.push({author: author, text: text, time: time});
+        }
+        return res;
+    """, default=[])
 
 # ══════════════════════════════════════════════════════════════════════════════════
 #  Portale / Zmiana mapy i NPC Helpers

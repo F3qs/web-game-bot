@@ -7,7 +7,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
 
 from config import WALK_TIMEOUT, MAP_CHANGE_WAIT, LOOP_INTERVAL, AFTER_BATTLE_WAIT, NO_MOB_RETRIES, gauss_sleep, rsleep_range, rsleep
-from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path as core_walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click
+from game import connect, safe_js, wait_for_game_ready, get_current_map, get_hero_pos, walk_to, smart_walk_to, walk_map_path as core_walk_map_path, find_nearest_mob, find_portal_to_next_map, change_map, find_walkable_neighbors, attack_mob, mob_exists, get_distance_to_mob, is_in_battle, wait_for_battle_end, unlock_movement, find_npc_on_map, talk_to_npc_by_id, wait_for_dialog, get_dialog_options, select_dialog_option_by_index, select_dialog_option_by_text, select_shop_in_dialog, wait_for_shop_open, close_shop_npc, NPC_TELEPORT_CITY_OPTIONS, check_for_death, go_to_homepage, return_to_game, human_move_and_click, ensure_in_game, is_on_login_page, get_incoming_private_messages
 from captcha import check_and_solve_captcha
 from notifications import send_discord_notification
 
@@ -180,7 +180,6 @@ def restock_routine(driver, cfg, gui=None) -> bool:
         cfg._restock_in_progress = False
         if not success: cfg.status = "Aktywny"
 
-
 def npc_teleport_routine(driver, cfg, gui=None) -> bool:
     if cfg._npc_teleport_in_progress: return False
     cfg._npc_teleport_in_progress = True
@@ -257,31 +256,129 @@ def npc_teleport_routine(driver, cfg, gui=None) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════════
 
 def bot_loop(cfg, gui):
-    driver = connect()
+    driver = connect(cfg)
     no_mob_count = 0
+    last_pm_hash = set()
+    
     if cfg.discord_enabled: send_discord_notification(cfg.discord_webhook_url, "Bot uruchomiony.", "START")
         
     while cfg.running:
         try:
+            # --- WIADOMOŚCI PRYWATNE (DISCORD) ---
+            if cfg.discord_enabled and cfg.discord_private_messages:
+                pms = get_incoming_private_messages(driver)
+                for pm in pms:
+                    # Unikalny identyfikator wiadomości: czas-autor-tekst
+                    msg_hash = f"{pm['time']}-{pm['author']}-{pm['text']}"
+                    if msg_hash not in last_pm_hash:
+                        send_discord_notification(
+                            cfg.discord_webhook_url, 
+                            f"**Od:** {pm['author']}\n**Godz:** {pm['time']}\n\n{pm['text']}", 
+                            "📩 Wiadomość Prywatna", 
+                            color=0x9b59b6
+                        )
+                        last_pm_hash.add(msg_hash)
+                        # Czyścimy hashset jeśli za duży (powyżej 100 wiadomości)
+                        if len(last_pm_hash) > 100:
+                            last_pm_hash = set(list(last_pm_hash)[-50:])
+
+            # --- HARMONOGRAM ---
+            if cfg.schedule_enabled and not cfg.is_in_schedule_window():
+                if not cfg._scheduler_idle:
+                    cfg._scheduler_idle = True
+                    secs = cfg.seconds_until_next_window()
+                    # humanizacja: losowe przesuniecie startu +-offset minut
+                    offset_s = random.randint(-cfg.schedule_random_offset * 60,
+                                               cfg.schedule_random_offset * 60)
+                    wait_total = max(60, secs + offset_s)
+                    import datetime
+                    wake_at = datetime.datetime.now() + datetime.timedelta(seconds=wait_total)
+                    cfg.status = f"Harmonogram — czekam do {wake_at.strftime('%H:%M')}"
+                    gui.log(f"[HARMONOGRAM] Poza oknem aktywnosci. Czekam do ok. {wake_at.strftime('%H:%M')} ({wait_total//60} min).")
+                    if cfg.discord_enabled:
+                        send_discord_notification(cfg.discord_webhook_url,
+                            f"Bot wychodzi z gry zgodnie z harmonogramem.\nPowrot ok. **{wake_at.strftime('%H:%M')}**.",
+                            "⏰ Harmonogram — przerwa", color=0x5865f2)
+                    go_to_homepage(driver)
+                    cfg._schedule_next_event_ts = time.time() + wait_total
+                else:
+                    # juz czekamy — sprawdzamy co 30s czy czas minal
+                    remaining = cfg._schedule_next_event_ts - time.time()
+                    if remaining > 0:
+                        # odswiezamy status z odmierzaniem
+                        mins = int(remaining // 60)
+                        cfg.status = f"Harmonogram — czekam {mins} min..."
+                        time.sleep(min(30, remaining))
+                    else:
+                        # czas minietyl, dodaj jeszcze losowy offset (by nie bylo idealnie punktualnie)
+                        extra = random.randint(0, cfg.schedule_random_offset * 60)
+                        if extra > 0:
+                            gui.log(f"[HARMONOGRAM] Dodatkowe losowe opoznienie: {extra}s")
+                            time.sleep(extra)
+                        cfg._scheduler_idle = False
+                        gui.log("[HARMONOGRAM] Wchodze do gry!")
+                        if cfg.discord_enabled:
+                            send_discord_notification(cfg.discord_webhook_url,
+                                "Bot wchodzi do gry zgodnie z harmonogramem.",
+                                "⏰ Harmonogram — start", color=0x2b8a3e)
+                        ensure_in_game(driver, cfg=cfg, gui=gui, timeout=90)
+                continue
+
+            # Jesli wlasnie skonczyl sie idle harmonogramu, zresetuj flage
+            if cfg._scheduler_idle:
+                cfg._scheduler_idle = False
+
+            # --- STRONA LOGOWANIA / BRAK GRY ---
+            # Wykryj wylogowanie lub przekierowanie na strone glowna.
+            # Ignoruj jesli bot sam tam poszedl po smierci lub harmonogramie.
+            if is_on_login_page(driver) and not cfg._in_death_sequence and not cfg._scheduler_idle:
+                # Dodatkowe 2s bufor — URL moze chwilowo pokazywac strone logowania
+                # podczas nawigacji do serwera gry (np. przekierowanie po kliknieciu).
+                time.sleep(2.0)
+                if not is_on_login_page(driver):
+                    # Byl to stan przejsciowy — juz jestesmy w drodze do gry
+                    continue
+
+                gui.log("⚠️ Wykryto strone logowania — probuje wejsc do gry...")
+                cfg.status = "Logowanie — wybor postaci..."
+                ok = ensure_in_game(driver, cfg=cfg, gui=gui, timeout=90)
+                if ok:
+                    gui.log("✓ Powrot do gry po automatycznym logowaniu.")
+                    cfg.status = "Aktywny"
+                    if cfg.discord_enabled:
+                        send_discord_notification(cfg.discord_webhook_url, "Powrot do gry po automatycznym wyborze postaci.", "🔄 Auto-Login", color=0x5865f2)
+                else:
+                    gui.log("❌ Nie udalo sie automatycznie zalogowac. Czekam 30s...")
+                    cfg.status = "Blad logowania — czekam..."
+                    for _ in range(30):
+                        if not cfg.running: break
+                        time.sleep(1)
+                continue
+
             # --- ZGON ---
             death_time = check_for_death(driver)
             if death_time is not None:
                 cfg.deaths += 1
+                cfg._in_death_sequence = True  # blokuj auto-login podczas oczekiwania
                 cfg.status = f"Zgon! Odrodzenie: {death_time}s"
                 gui.log(f"☠️ Zgon. Odrodzenie za {death_time} sekund.")
                 if cfg.discord_enabled:
                     send_discord_notification(cfg.discord_webhook_url, f"Postać zginęła! Powrót za **{death_time // 60}m {death_time % 60}s**.\nLiczba śmierci: **{cfg.deaths}**.", "💀 Zgon!", color=0xde2121)
                 
-                # Ochrona przed detekcją i wylogowaniem - czekamy na stronie głównej
+                # Czekamy na stronie głównej — bot celowo tam idzie, to nie wylogowanie
                 go_to_homepage(driver)
                 wait_duration = death_time + random.uniform(15, 45)
                 end_t = time.time() + wait_duration
                 while time.time() < end_t and cfg.running: time.sleep(1)
                 if not cfg.running: break
-                    
-                return_to_game(driver)
-                wait_for_game_ready(driver, timeout=60)
                 
+                # Wróć do gry — postać powinna być gotowa, nie potrzeba wybierać jej ponownie
+                return_to_game(driver)
+                if not wait_for_game_ready(driver, timeout=60):
+                    gui.log("❌ Gra nie załadowała się po śmierci. Czekam kolejne 30s...")
+                    time.sleep(30)
+                cfg._in_death_sequence = False  # zdejmij blokadę
+
                 if getattr(cfg, 'death_return_path', '').strip():
                     walk_map_path(driver, cfg, gui, cfg.death_return_path, tag="ŚMIERĆ-POWRÓT")
                 continue
@@ -310,7 +407,7 @@ def bot_loop(cfg, gui):
             unlock_movement(driver)
 
             # --- SZUKANIE MOBA ---
-            mob = find_nearest_mob(driver, cfg.min_lvl, cfg.max_lvl, min_group=cfg.min_group, max_group=cfg.max_group)
+            mob = find_nearest_mob(driver, cfg.min_lvl, cfg.max_lvl, min_group=cfg.min_group, max_group=cfg.max_group, avoid_elites=cfg.avoid_elites)
             
             if not mob:
                 no_mob_count += 1
@@ -367,7 +464,7 @@ def bot_loop(cfg, gui):
                     if current_dist <= 1: return 'arrived'
                     if current_dist > 3 and (time.time() - last_better_mob_check > 0.8):
                         last_better_mob_check = time.time()
-                        better = find_nearest_mob(drv, cfg.min_lvl, cfg.max_lvl, min_group=cfg.min_group, max_group=cfg.max_group)
+                        better = find_nearest_mob(drv, cfg.min_lvl, cfg.max_lvl, min_group=cfg.min_group, max_group=cfg.max_group, avoid_elites=cfg.avoid_elites)
                         if better and better['id'] != mob_id:
                             b_dist = better.get('dist', better.get('mdist', 999))
                             if b_dist < (current_dist - 2): return 'abort' 
@@ -395,8 +492,11 @@ def bot_loop(cfg, gui):
         except KeyboardInterrupt: break
         except (InvalidSessionIdException, NoSuchWindowException):
             gui.log("Utracono połączenie z przeglądarką. Próbuję połączyć się ponownie...")
+            cfg._in_death_sequence = False  # przy utracie połączenia zresetuj flagę — to nie śmierć
             gauss_sleep(5, 1)
-            try: driver = connect()
+            try:
+                driver = connect(cfg)
+                ensure_in_game(driver, cfg=cfg, gui=gui, timeout=90)
             except: pass
         except Exception as e:
             traceback.print_exc()
