@@ -1,2 +1,0 @@
-@echo off
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\Users\NOWYUZ~1\AppData\Local\Google\Chrome\User Data" --profile-directory="Profile 1" --disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-renderer-backgrounding --disable-features=CalculateNativeWinOcclusion --disable-blink-features=AutomationControlled https://jaruna.margonem.pl/
